@@ -1,5 +1,4 @@
-// The report is a static, self-contained page (no external requests) so it keeps
-// working when opened directly from Finder, offline, next to segments.csv.
+// Self-contained offline report, populated with a base64-encoded JSON snapshot.
 // Kept as a raw string literal (`#"""..."""#`) so JS regex escapes like \r\n
 // pass through untouched instead of being interpreted as Swift escapes.
 let reportHTMLTemplate = #"""
@@ -57,6 +56,11 @@ let reportHTMLTemplate = #"""
   .dropzone.dragover { border-color: var(--series-1); background: rgba(42, 120, 214, 0.08); }
   .dropzone p { margin: 0 0 12px; }
   .load-error { color: #d03b3b; margin-top: 16px !important; font-size: 14px; }
+  .source-info { font-size: 13px; color: var(--text-secondary); overflow-wrap: anywhere; white-space: pre-line; margin-bottom: 24px; }
+  .report-filters { display: flex; align-items: end; flex-wrap: wrap; gap: 16px; margin-bottom: 20px; }
+  .report-filters label { display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
+  .report-filters select { font: inherit; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; background: var(--surface-1); color: var(--text-primary); min-width: 160px; }
+  .period-heading { font-size: 18px; font-weight: 600; margin: 0 0 16px; }
 
   .hero-section { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 12px; margin-bottom: 32px; }
   .stat-tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; display: flex; flex-direction: column; gap: 4px; justify-content: center; }
@@ -104,14 +108,31 @@ let reportHTMLTemplate = #"""
     </div>
   </header>
 
+  <p id="sourceInfo" class="source-info"></p>
   <div id="dropzone" class="dropzone no-print">
+    <p id="loadStatus" role="status" hidden></p>
     <p>Drop <code>segments.csv</code> here, or</p>
     <button id="pickBtn" class="btn-primary">Choose File…</button>
     <input type="file" id="fileInput" accept=".csv" hidden>
-    <p id="loadError" class="load-error" hidden></p>
+    <p id="loadError" class="load-error" role="alert" hidden></p>
   </div>
 
   <main id="report" hidden>
+    <div class="report-filters no-print">
+      <div>
+        <label for="periodMode">Report</label>
+        <select id="periodMode">
+          <option value="month">Monthly</option>
+          <option value="year">Yearly</option>
+          <option value="all">All time</option>
+        </select>
+      </div>
+      <div id="periodChoice">
+        <label for="periodValue" id="periodLabel">Month</label>
+        <select id="periodValue"></select>
+      </div>
+    </div>
+    <h2 id="periodHeading" class="period-heading" aria-live="polite"></h2>
     <section class="hero-section">
       <div class="stat-tile">
         <span class="stat-label">Total tracked time</span>
@@ -132,6 +153,11 @@ let reportHTMLTemplate = #"""
     </section>
 
     <section class="chart-section">
+      <h2>By project</h2>
+      <div class="bar-list" id="projectBars"></div>
+    </section>
+
+    <section class="chart-section">
       <h2>By task</h2>
       <div class="bar-list" id="taskBars"></div>
     </section>
@@ -142,10 +168,10 @@ let reportHTMLTemplate = #"""
     </section>
 
     <section class="table-section">
-      <h2>All segments</h2>
+      <h2>Segments</h2>
       <div class="table-scroll">
         <table id="segmentsTable">
-          <thead><tr><th>Task</th><th>Start</th><th>End</th><th>Duration</th></tr></thead>
+          <thead><tr><th>Project</th><th>Task</th><th>Start</th><th>End</th><th>Duration</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -156,6 +182,7 @@ let reportHTMLTemplate = #"""
 
 </div>
 
+<script type="application/octet-stream" id="snapshotData">__TYMECLONE_SNAPSHOT__</script>
 <script>
 (function () {
   var dropzone = document.getElementById('dropzone');
@@ -165,16 +192,73 @@ let reportHTMLTemplate = #"""
   var printBtn = document.getElementById('printBtn');
   var loadError = document.getElementById('loadError');
   var report = document.getElementById('report');
+  var loadStatus = document.getElementById('loadStatus');
+  var sourceInfo = document.getElementById('sourceInfo');
+  var sourceDescription = '';
+  var periodMode = document.getElementById('periodMode');
+  var periodValue = document.getElementById('periodValue');
+  var allRows = [];
+  var availableMonths = [];
+  var availableYears = [];
 
-  function parseCSVLine(line) {
+  function monthForStart(start) {
+    // Use the recorded local start date, without timezone conversion. As with
+    // daily exports, a segment crossing a boundary belongs to its start date.
+    var match = /^(\d{4})-(\d{2})-(\d{2})(?: |T|$)/.exec(start);
+    if (!match) return null;
+    var year = Number(match[1]);
+    var month = Number(match[2]);
+    var day = Number(match[3]);
+    var leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    var days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (year < 1 || month < 1 || month > 12 || day < 1 || day > days[month - 1]) return null;
+    return match[1] + '-' + match[2];
+  }
+
+  function monthLabel(key) {
+    var names = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    return names[Number(key.slice(5, 7)) - 1] + ' ' + key.slice(0, 4);
+  }
+
+  function updatePeriodOptions(preferred) {
+    var yearly = periodMode.value === 'year';
+    var periods = yearly ? availableYears : availableMonths;
+    document.getElementById('periodChoice').hidden = periodMode.value === 'all';
+    document.getElementById('periodLabel').textContent = yearly ? 'Year' : 'Month';
+    periodValue.innerHTML = '';
+    periods.forEach(function (key) {
+      var option = document.createElement('option');
+      option.value = key;
+      option.textContent = yearly ? key : monthLabel(key);
+      periodValue.appendChild(option);
+    });
+    // Keep the same year when switching between monthly and yearly views.
+    periodValue.value = periods.find(function (key) { return key === preferred; }) ||
+      periods.find(function (key) { return preferred && key.slice(0, 4) === preferred.slice(0, 4); }) || periods[0] || '';
+  }
+
+  function renderSelectedPeriod() {
+    var mode = periodMode.value;
+    var selected = periodValue.value;
+    var label = mode === 'all' ? 'All time' : (mode === 'year' ? selected : monthLabel(selected));
+    document.getElementById('periodHeading').textContent = label;
+    var rows = allRows.filter(function (row) {
+      return mode === 'all' || (mode === 'year' ? row.month.slice(0, 4) : row.month) === selected;
+    });
+    render(rows);
+    document.getElementById('reportMeta').textContent = label + ' · ' + sourceDescription;
+  }
+
+  function parseCSVRecords(text) {
+    var records = [];
     var fields = [];
     var current = '';
     var insideQuotes = false;
-    for (var i = 0; i < line.length; i++) {
-      var char = line[i];
+    for (var i = 0; i < text.length; i++) {
+      var char = text[i];
       if (insideQuotes) {
         if (char === '"') {
-          if (line[i + 1] === '"') { current += '"'; i++; }
+          if (text[i + 1] === '"') { current += '"'; i++; }
           else { insideQuotes = false; }
         } else {
           current += char;
@@ -184,12 +268,22 @@ let reportHTMLTemplate = #"""
       } else if (char === ',') {
         fields.push(current);
         current = '';
+      } else if (char === '\r' || char === '\n') {
+        fields.push(current);
+        if (fields.some(function (field) { return field.length > 0; })) records.push(fields);
+        fields = [];
+        current = '';
+        if (char === '\r' && text[i + 1] === '\n') i++;
       } else {
         current += char;
       }
     }
-    fields.push(current);
-    return fields;
+    if (insideQuotes) throw new Error('The CSV contains an unfinished quoted field.');
+    if (current.length || fields.length) {
+      fields.push(current);
+      records.push(fields);
+    }
+    return records;
   }
 
   function parseDurationToSeconds(text) {
@@ -221,9 +315,9 @@ let reportHTMLTemplate = #"""
   }
 
   function parseCSV(text) {
-    var lines = text.split(/\r\n|\r|\n/).filter(function (l) { return l.length > 0; });
-    if (lines.length === 0) throw new Error('Empty file.');
-    var header = parseCSVLine(lines[0]).map(function (h) { return h.trim(); });
+    var records = parseCSVRecords(text);
+    if (records.length === 0) return [];
+    var header = records[0].map(function (h) { return h.trim(); });
     var taskIdx = header.indexOf('Task');
     var startIdx = header.indexOf('Start');
     var endIdx = header.indexOf('End');
@@ -233,23 +327,28 @@ let reportHTMLTemplate = #"""
     }
 
     var rows = [];
-    for (var i = 1; i < lines.length; i++) {
-      var cols = parseCSVLine(lines[i]);
+    for (var i = 1; i < records.length; i++) {
+      var cols = records[i];
       if (cols.length <= Math.max(taskIdx, startIdx, endIdx, durationIdx)) continue;
+      var month = monthForStart(cols[startIdx]);
+      if (!month) throw new Error('Invalid Start date in CSV record ' + (i + 1) + '. Expected YYYY-MM-DD HH:mm:ss.');
       rows.push({
         task: cols[taskIdx],
         start: cols[startIdx],
         end: cols[endIdx],
-        durationSeconds: parseDurationToSeconds(cols[durationIdx])
+        durationSeconds: parseDurationToSeconds(cols[durationIdx]),
+        month: month
       });
     }
     return rows;
   }
 
-  function totalOf(map) {
-    var total = 0;
-    map.forEach(function (v) { total += v; });
-    return total || 1;
+  function projectForTask(name) {
+    var separator = name.indexOf(':');
+    var project = separator > 0 ? name.slice(0, separator).trim() : '';
+    var task = separator > 0 ? name.slice(separator + 1).trim() : '';
+    // Require both parts; an ordinary name ending in ':' stays ungrouped.
+    return project && task ? { project: project, task: task } : { project: null, task: name };
   }
 
   function renderBars(containerId, entries) {
@@ -263,7 +362,7 @@ let reportHTMLTemplate = #"""
       var row = document.createElement('div');
       row.className = 'bar-row';
       var pct = Math.max((seconds / max) * 100, 2);
-      row.title = formatHMS(seconds);
+      row.title = label + ' — ' + formatHMS(seconds);
       row.innerHTML =
         '<span class="bar-label">' + escapeHTML(label) + '</span>' +
         '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
@@ -274,21 +373,27 @@ let reportHTMLTemplate = #"""
 
   function render(rows) {
     if (rows.length === 0) {
-      showError('The file has no segment rows yet.');
+      showStatus('No saved segments yet. Stop a recording, then choose Open Report again.');
       return;
     }
 
     var totalSeconds = 0;
     var byTask = new Map();
+    var byProject = new Map();
     var byDate = new Map();
     rows.forEach(function (r) {
       totalSeconds += r.durationSeconds;
       byTask.set(r.task, (byTask.get(r.task) || 0) + r.durationSeconds);
+      var project = projectForTask(r.task).project;
+      byProject.set(project, (byProject.get(project) || 0) + r.durationSeconds);
       var date = r.start.slice(0, 10);
       byDate.set(date, (byDate.get(date) || 0) + r.durationSeconds);
     });
 
     var taskEntries = Array.from(byTask.entries()).sort(function (a, b) { return b[1] - a[1]; });
+    var projectEntries = Array.from(byProject.entries()).sort(function (a, b) { return b[1] - a[1]; }).map(function (entry) {
+      return [entry[0] === null ? 'No project' : entry[0], entry[1]];
+    });
     var dateEntries = Array.from(byDate.entries()).sort(function (a, b) { return b[0].localeCompare(a[0]); });
     var dates = Array.from(byDate.keys()).sort();
     var dateRange = dates.length > 1 ? (dates[0] + ' → ' + dates[dates.length - 1]) : (dates[0] || '—');
@@ -298,6 +403,7 @@ let reportHTMLTemplate = #"""
     document.getElementById('statTasks').textContent = String(byTask.size);
     document.getElementById('statRange').textContent = dateRange;
 
+    renderBars('projectBars', projectEntries);
     renderBars('taskBars', taskEntries);
     renderBars('dayBars', dateEntries);
 
@@ -306,19 +412,29 @@ let reportHTMLTemplate = #"""
     var sortedRows = rows.slice().sort(function (a, b) { return b.start.localeCompare(a.start); });
     sortedRows.forEach(function (r) {
       var tr = document.createElement('tr');
-      tr.innerHTML = '<td>' + escapeHTML(r.task) + '</td><td>' + escapeHTML(r.start) + '</td><td>' + escapeHTML(r.end) + '</td><td>' + formatHMS(r.durationSeconds) + '</td>';
+      var parts = projectForTask(r.task);
+      tr.innerHTML = '<td>' + escapeHTML(parts.project === null ? 'No project' : parts.project) + '</td><td>' + escapeHTML(parts.task) + '</td><td>' + escapeHTML(r.start) + '</td><td>' + escapeHTML(r.end) + '</td><td>' + formatHMS(r.durationSeconds) + '</td>';
       tbody.appendChild(tr);
     });
 
-    document.getElementById('reportMeta').textContent = 'Report generated ' + new Date().toLocaleString();
+    document.getElementById('reportMeta').textContent = sourceDescription;
 
     dropzone.hidden = true;
     report.hidden = false;
   }
 
   function showError(message) {
+    loadStatus.hidden = true;
     loadError.textContent = message;
     loadError.hidden = false;
+    dropzone.hidden = false;
+    report.hidden = true;
+  }
+
+  function showStatus(message) {
+    loadError.hidden = true;
+    loadStatus.textContent = message;
+    loadStatus.hidden = false;
     dropzone.hidden = false;
     report.hidden = true;
   }
@@ -326,8 +442,14 @@ let reportHTMLTemplate = #"""
   function loadCSVText(text) {
     try {
       loadError.hidden = true;
-      var rows = parseCSV(text);
-      render(rows);
+      loadStatus.hidden = true;
+      allRows = parseCSV(text);
+      availableMonths = Array.from(new Set(allRows.map(function (row) { return row.month; }))).sort().reverse();
+      availableYears = Array.from(new Set(availableMonths.map(function (month) { return month.slice(0, 4); })));
+      periodMode.value = 'month';
+      updatePeriodOptions();
+      if (allRows.length === 0) render([]);
+      else renderSelectedPeriod();
     } catch (e) {
       showError(e.message);
     }
@@ -335,7 +457,11 @@ let reportHTMLTemplate = #"""
 
   function loadFile(file) {
     var reader = new FileReader();
-    reader.onload = function () { loadCSVText(String(reader.result)); };
+    reader.onload = function () {
+      sourceDescription = 'File: ' + file.name + '\nLoaded ' + new Date().toLocaleString();
+      sourceInfo.textContent = sourceDescription;
+      loadCSVText(String(reader.result));
+    };
     reader.onerror = function () { showError('Could not read that file.'); };
     reader.readAsText(file);
   }
@@ -365,24 +491,31 @@ let reportHTMLTemplate = #"""
     dropzone.hidden = false;
     report.hidden = true;
     loadError.hidden = true;
+    loadStatus.hidden = true;
   });
 
   printBtn.addEventListener('click', function () { window.print(); });
+  periodMode.addEventListener('change', function () {
+    updatePeriodOptions(periodValue.value);
+    renderSelectedPeriod();
+  });
+  periodValue.addEventListener('change', renderSelectedPeriod);
 
-  function tryAutoLoad() {
-    fetch('segments.csv', { cache: 'no-store' })
-      .then(function (res) {
-        if (!res.ok) throw new Error('not found');
-        return res.text();
-      })
-      .then(loadCSVText)
-      .catch(function () {
-        // Local file:// fetches are blocked by most browsers - fall back to manual load.
-        dropzone.hidden = false;
-      });
+  function loadSnapshot() {
+    try {
+      var encoded = document.getElementById('snapshotData').textContent.trim();
+      var bytes = Uint8Array.from(atob(encoded), function (char) { return char.charCodeAt(0); });
+      var snapshot = JSON.parse(new TextDecoder().decode(bytes));
+      sourceDescription = 'Source: ' + snapshot.source + '\nSnapshot ' + new Date(snapshot.generatedAt).toLocaleString() + ' · Saved segments only';
+      sourceInfo.textContent = sourceDescription + '\nChoose Open Report in the app again to refresh.';
+      if (typeof snapshot.csv === 'string') loadCSVText(snapshot.csv);
+      else showStatus(snapshot.message);
+    } catch (error) {
+      showError('Could not load the report snapshot. Choose a CSV file below.');
+    }
   }
 
-  tryAutoLoad();
+  loadSnapshot();
 })();
 </script>
 

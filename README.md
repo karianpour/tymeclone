@@ -5,6 +5,9 @@ A tiny macOS menu bar timer that reproduces the one feature from [Tyme 2](https:
 ## Features
 
 - Menu bar timer with Start/Stop recording, tagged with a free-text task name
+- Recent-task dropdown with the last five distinct tasks, remembered across restarts
+- Change tasks while recording to save the previous segment and continue under the new task
+- Optional `Project: Task` naming for project totals without changing the CSV format
 - A red dot (● recording) or black square (■ idle) status icon, plus a jitter-free monospaced elapsed time
 - Idle detection via macOS' native `HIDIdleTime` (the same signal used for screensaver/display sleep) — no accessibility permissions required
 - When the configured idle threshold is exceeded, a popup offers three choices:
@@ -15,9 +18,9 @@ A tiny macOS menu bar timer that reproduces the one feature from [Tyme 2](https:
 - "Show Seconds" toggle for the menu bar display
 - Read-only "Task Total" menu entry showing the summed time for the current task across all recorded segments, live while recording
 - Every finished segment is appended to a `segments.csv` file, one row per segment
-- Configurable output folder (defaults to `~/Documents/TymeClone`, resolved at runtime so it works on any machine)
+- Configurable output folder (defaults to `~/Documents/TymeClone`, resolved at runtime so it works on any machine), with Reveal in Finder
 - "Export Daily Summary…" writes a `daily_summary.csv` with per-day totals
-- "Open Report" writes a self-contained `report.html` (out of the way, not into the output folder — nothing for you to accidentally break) and opens it in your browser — drop `segments.csv` in (or use the file picker), get totals by task and by day as bar charts plus the full segment table, and an "Export as PDF" button (uses the browser's print-to-PDF)
+- "Open Report" opens a self-contained `report.html` with your saved segments already loaded: totals by project, task, and day, a full segment table, and "Export as PDF" (uses the browser's print-to-PDF)
 
 ## Requirements
 
@@ -62,13 +65,13 @@ Since it's built locally (not downloaded), macOS won't set a quarantine flag, so
 Click the status icon in the menu bar:
 
 - **Start/Stop Recording** — toggles the timer for the current task
-- **Set task (…)** — opens a popup to change the current task name; the menu title always shows the active one. Confirming with an empty field falls back to "Unnamed task". The last name used is remembered across restarts
+- **Set task (…)** — type a name or select one of the five recent tasks, then click **Set**. Selection only fills the field; Cancel changes nothing. Names are remembered across restarts, and the recent list is initially seeded from saved tasks. An empty field falls back to "Unnamed task". While recording, setting a different task saves the old segment and starts the new one at the same timestamp. If saving fails, the original timer keeps running and an error is shown
 - **Task Total: …** — read-only, shows the total time recorded for the current task (sum of all matching `segments.csv` rows, plus the running elapsed time while recording)
 - **Idle Threshold** — how long the Mac must be idle before the popup appears
 - **Show Seconds** — toggle seconds in the menu bar display
-- **Output Folder** — shows the current CSV location; "Choose Output Folder…" picks a custom folder, "Use Default Location" resets to `~/Documents/TymeClone`
+- **Output Folder** — shows the current CSV location; "Choose Output Folder…" picks a custom folder, "Use Default Location" resets to `~/Documents/TymeClone`. **Reveal in Finder** selects `segments.csv` if present, otherwise reveals the output folder (creating it if needed)
 - **Export Daily Summary…** — aggregates `segments.csv` by day into `daily_summary.csv` in the same folder
-- **Open Report** — (re)writes `report.html` into your system temp directory and opens it in your default browser for a visual breakdown; load `segments.csv` via drag-and-drop or "Choose File…"
+- **Open Report** — generates `TymeClone/report.html` in your system temp directory, embeds the current saved CSV, and opens it in your default browser. Choose it again to refresh; browser refresh alone retains the embedded snapshot
 
 ## CSV format
 
@@ -92,15 +95,36 @@ Date,Total Duration
 
 ## HTML report
 
-`report.html` is a static, self-contained page (no external requests, no dependencies) that's rewritten into your system temp directory every time you launch the app or click "Open Report" — not into the output folder, so there's nothing sitting next to `segments.csv` that you could accidentally rename, edit, or delete. It always matches the current app version since it's regenerated on every open.
+`report.html` is a static, self-contained page with no external requests or dependencies. Each **Open Report** action reads the current output folder and embeds a snapshot of `segments.csv`, safely encoded to preserve Unicode and special characters. The report lives in `TymeClone/report.html` under the system temporary directory.
 
-Because of that, it doesn't try to auto-load `segments.csv` (it's no longer sitting next to it, and browsers block that kind of local `fetch()` anyway) — just drag `segments.csv` onto the page, or use "Choose File…". Once loaded, it shows total tracked time, a breakdown by task and by day (bar charts), and the full segment table. "Export as PDF" triggers the browser's print dialog — choose "Save as PDF" there.
+The source path and snapshot time appear above the report. Only saved segments are included; stop the current recording to include it, then choose **Open Report** again. An already-open report does not update automatically. Missing data shows an empty-state message; unreadable files show the reason. You can still load another CSV using **Load different file**, drag-and-drop, or **Choose File…**. "Export as PDF" opens the browser's print dialog, where you can choose "Save as PDF".
 
-Since it's just a browser tab, you can also just print it (`Cmd+P`) or point any other CSV at it via drag-and-drop — it's not tied to this specific app's output.
+### Monthly and yearly reports
+
+The report defaults to the **latest month with recorded segments** in the loaded CSV. Choose **Monthly** and a month, or **Yearly** and a year; only periods present in the file are listed, newest first. **All time** shows the entire file. Loading a different CSV resets the selection to its latest month.
+
+The selected period applies to every total, chart, and segment row. The period heading is included in PDF exports. Segments belong to their recorded local **Start** date, including segments crossing midnight, a month boundary, or a year boundary; their duration is not split between periods.
+
+### Projects
+
+Name tasks as `Project: Task`, for example `Orca: Fix checkout` and `Orca: Customer meeting`. The report splits at the first colon and trims spaces around both parts. Both parts must be nonempty; ordinary names such as `Admin` appear under **No project**.
+
+The **By project** chart sums all tasks in each project. **By task** retains the full recorded names so identical task descriptions in different projects stay separate. The segment table shows Project and Task columns. Existing names and the four-column CSV format are preserved; there is no migration or automatic renaming of past work.
+
+## Checks
+
+Run the native regression tests and the dependency-free report checks:
+
+```sh
+swift test
+node --test Tests/report.test.cjs
+```
+
+The report checks exercise the actual embedded JavaScript with a minimal DOM harness. For a manual UI check, launch the app and confirm that recent-task selection requires **Set**, **Cancel** changes nothing, switching during a recording saves time under the old name, **Reveal in Finder** selects the expected file, and **Open Report** displays saved data immediately. Also check PDF export in your browser.
 
 ## Scope
 
-This is a focused prototype covering the idle-detection killer feature plus just enough to make the export usable — there's no project hierarchy, editing of past segments, or GUI reporting (yet). Segments are a single flat timeline tagged with a task name, not a full project/task tree.
+This remains a focused menu bar timer. Project grouping is derived from task names; there is no project-management hierarchy or editing of past segments. Stop a running recording before quitting the app.
 
 ## Please note
 

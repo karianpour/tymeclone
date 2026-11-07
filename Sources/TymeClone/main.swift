@@ -23,165 +23,6 @@ func systemIdleSeconds() -> TimeInterval {
     return TimeInterval(idleNs) / 1_000_000_000
 }
 
-func formatDuration(_ seconds: TimeInterval, includeSeconds: Bool = true) -> String {
-    let total = Int(seconds.rounded())
-    let h = total / 3600
-    let m = (total % 3600) / 60
-    let s = total % 60
-    return includeSeconds ? String(format: "%02d:%02d:%02d", h, m, s) : String(format: "%02d:%02d", h, m)
-}
-
-func formatClock(_ date: Date) -> String {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "HH:mm:ss"
-    return formatter.string(from: date)
-}
-
-func formatDateTime(_ date: Date) -> String {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-    return formatter.string(from: date)
-}
-
-// Resolved at runtime from the current user's home directory, so the default
-// works on any machine - unlike a path baked in at compile time via #filePath.
-let defaultOutputFolder = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent("Documents")
-    .appendingPathComponent("TymeClone")
-let outputFolderDefaultsKey = "OutputFolder"
-let lastTaskNameDefaultsKey = "LastTaskName"
-
-func currentOutputFolder() -> URL {
-    if let custom = UserDefaults.standard.string(forKey: outputFolderDefaultsKey), !custom.isEmpty {
-        return URL(fileURLWithPath: custom)
-    }
-    return defaultOutputFolder
-}
-
-// Quotes a CSV field if it contains characters that would otherwise break column parsing.
-func csvField(_ value: String) -> String {
-    guard value.contains(",") || value.contains("\"") || value.contains("\n") else {
-        return value
-    }
-    return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
-}
-
-// Parses a single CSV line, honoring quoted fields (so task names may contain commas).
-func parseCSVLine(_ line: Substring) -> [String] {
-    var fields: [String] = []
-    var current = ""
-    var insideQuotes = false
-    let chars = Array(line)
-    var i = 0
-    while i < chars.count {
-        let char = chars[i]
-        if insideQuotes {
-            if char == "\"" {
-                if i + 1 < chars.count && chars[i + 1] == "\"" {
-                    current.append("\"")
-                    i += 1
-                } else {
-                    insideQuotes = false
-                }
-            } else {
-                current.append(char)
-            }
-        } else if char == "\"" {
-            insideQuotes = true
-        } else if char == "," {
-            fields.append(current)
-            current = ""
-        } else {
-            current.append(char)
-        }
-        i += 1
-    }
-    fields.append(current)
-    return fields
-}
-
-// Rewritten on every launch and every menu click so it always matches the current
-// app version. Lives in the system temp directory, not the user's output folder -
-// so there's nothing sitting next to segments.csv for a user to rename or delete.
-@discardableResult
-func writeReportHTML() -> URL? {
-    let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent("report.html")
-    guard (try? reportHTMLTemplate.write(to: fileURL, atomically: true, encoding: .utf8)) != nil else {
-        return nil
-    }
-    return fileURL
-}
-
-func appendSegmentToCSV(task: String, start: Date, end: Date, duration: TimeInterval) {
-    let folder = currentOutputFolder()
-    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-    let fileURL = folder.appendingPathComponent("segments.csv")
-    let line = "\(csvField(task)),\(formatDateTime(start)),\(formatDateTime(end)),\(formatDuration(duration))\n"
-
-    if !FileManager.default.fileExists(atPath: fileURL.path) {
-        let header = "Task,Start,End,Duration\n"
-        try? (header + line).write(to: fileURL, atomically: true, encoding: .utf8)
-    } else if let handle = try? FileHandle(forWritingTo: fileURL) {
-        handle.seekToEndOfFile()
-        handle.write(line.data(using: .utf8)!)
-        try? handle.close()
-    }
-}
-
-// Sums the Duration of every segments.csv row matching the given task name.
-func totalDuration(forTask task: String) -> TimeInterval {
-    let segmentsURL = currentOutputFolder().appendingPathComponent("segments.csv")
-    guard let content = try? String(contentsOf: segmentsURL, encoding: .utf8) else {
-        return 0
-    }
-
-    var total: TimeInterval = 0
-    for line in content.split(separator: "\n").dropFirst() {
-        let columns = parseCSVLine(line)
-        guard columns.count == 4, columns[0] == task else { continue }
-        total += parseDuration(columns[3])
-    }
-    return total
-}
-
-func parseDuration(_ text: String) -> TimeInterval {
-    let parts = text.split(separator: ":").compactMap { Int($0) }
-    guard parts.count == 3 else { return 0 }
-    return TimeInterval(parts[0] * 3600 + parts[1] * 60 + parts[2])
-}
-
-enum ExportError: Error {
-    case noSegmentsFile
-}
-
-// Groups segments.csv by the Start date and writes the per-day totals to daily_summary.csv.
-func exportDailySummary() throws -> URL {
-    let folder = currentOutputFolder()
-    let segmentsURL = folder.appendingPathComponent("segments.csv")
-    guard FileManager.default.fileExists(atPath: segmentsURL.path) else {
-        throw ExportError.noSegmentsFile
-    }
-
-    let content = try String(contentsOf: segmentsURL, encoding: .utf8)
-    var totalsByDate: [String: TimeInterval] = [:]
-
-    for line in content.split(separator: "\n").dropFirst() {
-        let columns = parseCSVLine(line)
-        guard columns.count == 4 else { continue }
-        let date = String(columns[1].prefix(10))
-        totalsByDate[date, default: 0] += parseDuration(columns[3])
-    }
-
-    var output = "Date,Total Duration\n"
-    for date in totalsByDate.keys.sorted() {
-        output += "\(date),\(formatDuration(totalsByDate[date]!))\n"
-    }
-
-    let summaryURL = folder.appendingPathComponent("daily_summary.csv")
-    try output.write(to: summaryURL, atomically: true, encoding: .utf8)
-    return summaryURL
-}
-
 // SF Symbols give pixel-precise size and baseline control, unlike emoji characters
 // whose glyph metrics vary and don't line up cleanly with monospaced digit text.
 func makeStatusIcon(systemName: String, tint: NSColor?, pointSize: CGFloat = NSFont.systemFontSize - 1) -> NSImage {
@@ -226,13 +67,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var pollTimer: Timer?
 
-    private var isRecording = false
-    private var sessionStart: Date?
-    private var currentTaskName = "Unnamed task"
+    private var timer = TaskTimer(taskName: "Unnamed task")
+    private var isRecording: Bool { timer.startedAt != nil }
+    private var sessionStart: Date? { timer.startedAt }
+    private var currentTaskName: String { timer.taskName }
     private var taskHistoricalTotal: TimeInterval = 0
     private var idleThreshold: TimeInterval = 5 * 60
     private var hasPromptedForCurrentIdlePeriod = false
     private var showSeconds = true
+    private var recentTasks: [String] = []
+    private weak var taskDialogField: NSTextField?
 
     private var startStopItem: NSMenuItem!
     private var setTaskItem: NSMenuItem!
@@ -243,7 +87,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let savedTaskName = UserDefaults.standard.string(forKey: lastTaskNameDefaultsKey) ?? ""
-        currentTaskName = savedTaskName.isEmpty ? "Unnamed task" : savedTaskName
+        timer = TaskTimer(taskName: savedTaskName.isEmpty ? "Unnamed task" : savedTaskName)
+        recentTasks = UserDefaults.standard.stringArray(forKey: recentTaskNamesDefaultsKey)
+            .map { recentTaskNames(from: $0) } ?? initialRecentTaskNames(lastTask: savedTaskName)
+        UserDefaults.standard.set(recentTasks, forKey: recentTaskNamesDefaultsKey)
         taskHistoricalTotal = totalDuration(forTask: currentTaskName)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -289,6 +136,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         outputFolderInfoItem.isEnabled = false
         outputMenu.addItem(outputFolderInfoItem)
         outputMenu.addItem(NSMenuItem.separator())
+        let revealFolderItem = NSMenuItem(title: "Reveal in Finder", action: #selector(revealOutputFolder), keyEquivalent: "")
+        revealFolderItem.target = self
+        outputMenu.addItem(revealFolderItem)
         let chooseFolderItem = NSMenuItem(title: "Choose Output Folder\u{2026}", action: #selector(chooseOutputFolder), keyEquivalent: "")
         chooseFolderItem.target = self
         outputMenu.addItem(chooseFolderItem)
@@ -312,8 +162,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem.menu = menu
 
-        writeReportHTML()
-
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.tick()
         }
@@ -330,26 +178,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func setCurrentTask() {
         let alert = NSAlert()
         alert.messageText = "Task"
-        alert.informativeText = "What are you working on?"
+        alert.informativeText = "What are you working on? Use Project: Task to group your report by project."
         alert.addButton(withTitle: "Set")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .informational
 
-        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 100))
+        let textField = NSTextField(frame: NSRect(x: 0, y: 72, width: 340, height: 24))
         textField.stringValue = currentTaskName
-        textField.placeholderString = "Task name"
-        alert.accessoryView = textField
+        textField.placeholderString = "Project: Task, or a task name"
+        textField.setAccessibilityLabel("Task name")
+        accessory.addSubview(textField)
+
+        let recentLabel = NSTextField(labelWithString: "Recent tasks")
+        recentLabel.frame = NSRect(x: 0, y: 42, width: 340, height: 20)
+        accessory.addSubview(recentLabel)
+        let recentMenu = NSPopUpButton(frame: NSRect(x: 0, y: 8, width: 340, height: 28), pullsDown: false)
+        recentMenu.addItem(withTitle: recentTasks.isEmpty ? "No recent tasks yet" : "Choose a recent task…")
+        for task in recentTasks {
+            let item = NSMenuItem(title: task, action: nil, keyEquivalent: "")
+            item.representedObject = task
+            recentMenu.menu?.addItem(item)
+        }
+        recentMenu.isEnabled = !recentTasks.isEmpty
+        recentMenu.target = self
+        recentMenu.action = #selector(selectRecentTask(_:))
+        recentMenu.setAccessibilityLabel("Recent tasks")
+        accessory.addSubview(recentMenu)
+        alert.accessoryView = accessory
         alert.window.initialFirstResponder = textField
+        taskDialogField = textField
+        defer { taskDialogField = nil }
 
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         let entered = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        currentTaskName = entered.isEmpty ? "Unnamed task" : entered
+        let nextTask = entered.isEmpty ? "Unnamed task" : entered
+        let switchingWhileRecording = isRecording && nextTask != currentTaskName
+        let switchedAt = Date()
+        do {
+            try timer.setTask(nextTask, at: switchedAt, save: saveSegment)
+        } catch {
+            showSaveError(error)
+            return
+        }
         UserDefaults.standard.set(currentTaskName, forKey: lastTaskNameDefaultsKey)
+        rememberCurrentTask()
         setTaskItem.title = "Set task (\(currentTaskName))"
         taskHistoricalTotal = totalDuration(forTask: currentTaskName)
         taskTotalItem.title = "Task Total: \(formatDuration(taskHistoricalTotal))"
+        if switchingWhileRecording { hasPromptedForCurrentIdlePeriod = false }
+        updateTimerDisplay()
+    }
+
+    @objc private func selectRecentTask(_ sender: NSPopUpButton) {
+        guard let task = sender.selectedItem?.representedObject as? String else { return }
+        taskDialogField?.stringValue = task
+    }
+
+    private func rememberCurrentTask() {
+        recentTasks = recentTaskNames(from: [currentTaskName] + recentTasks)
+        UserDefaults.standard.set(recentTasks, forKey: recentTaskNamesDefaultsKey)
     }
 
     @objc private func setThreshold(_ sender: NSMenuItem) {
@@ -386,6 +276,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         outputFolderInfoItem.title = currentOutputFolder().path
     }
 
+    @objc private func revealOutputFolder() {
+        let folder = currentOutputFolder()
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let csvURL = folder.appendingPathComponent("segments.csv")
+            let selectedURL = FileManager.default.fileExists(atPath: csvURL.path) ? csvURL : folder
+            NSWorkspace.shared.activateFileViewerSelecting([selectedURL])
+        } catch {
+            showError("Could not reveal output folder", detail: "\(folder.path)\n\(error.localizedDescription)")
+        }
+    }
+
     @objc private func exportDailySummaryAction() {
         let alert = NSAlert()
         do {
@@ -403,40 +305,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openReport() {
-        guard let reportURL = writeReportHTML() else {
-            let alert = NSAlert()
-            alert.messageText = "Could not write report.html"
-            alert.informativeText = "Check that \(currentOutputFolder().path) is writable."
-            alert.alertStyle = .warning
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
-            return
+        do {
+            let reportURL = try writeReportHTML()
+            if !NSWorkspace.shared.open(reportURL) {
+                showError("Could not open report", detail: "The report was saved to \(reportURL.path), but the default browser could not open it.")
+            }
+        } catch {
+            showError("Could not write report.html", detail: error.localizedDescription)
         }
-        NSWorkspace.shared.open(reportURL)
     }
 
-    private func startRecording() {
-        isRecording = true
-        sessionStart = Date()
+    private func showError(_ title: String, detail: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.alertStyle = .warning
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    private func startRecording(at date: Date = Date()) {
+        timer.start(at: date)
+        rememberCurrentTask()
         hasPromptedForCurrentIdlePeriod = false
         startStopItem.title = "Stop Recording"
         print("Recording started at \(formatClock(sessionStart!)) for task '\(currentTaskName)'")
+        updateTimerDisplay()
     }
 
-    private func stopRecording(splitAt endDate: Date? = nil) {
-        guard let start = sessionStart else { return }
-        let end = endDate ?? Date()
-        let duration = end.timeIntervalSince(start)
-        print("Segment: \(formatClock(start)) - \(formatClock(end)) (\(formatDuration(duration))) [\(currentTaskName)]")
-        appendSegmentToCSV(task: currentTaskName, start: start, end: end, duration: duration)
-        taskHistoricalTotal += duration
+    @discardableResult
+    private func stopRecording(splitAt endDate: Date? = nil) -> Bool {
+        let segment: RecordedSegment
+        do {
+            guard let saved = try timer.stop(at: endDate ?? Date(), save: saveSegment) else { return true }
+            segment = saved
+        } catch {
+            showSaveError(error)
+            return false
+        }
+        print("Segment: \(formatClock(segment.start)) - \(formatClock(segment.end)) (\(formatDuration(segment.duration))) [\(currentTaskName)]")
+        taskHistoricalTotal += segment.duration
         taskTotalItem.title = "Task Total: \(formatDuration(taskHistoricalTotal))"
-        isRecording = false
-        sessionStart = nil
         startStopItem.title = "Start Recording"
+        updateTimerDisplay()
+        return true
     }
 
-    private func tick() {
+    private func showSaveError(_ error: Error) {
+        showError("Could not save recording", detail: "The timer is still running for \(currentTaskName).\n\(error.localizedDescription)")
+    }
+
+    private func updateTimerDisplay() {
         guard isRecording, let start = sessionStart else {
             statusItem.button?.attributedTitle = statusBarTitle(icon: idleIcon, text: formatDuration(0, includeSeconds: showSeconds))
             return
@@ -445,7 +364,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let elapsed = Date().timeIntervalSince(start)
         statusItem.button?.attributedTitle = statusBarTitle(icon: recordingIcon, text: formatDuration(elapsed, includeSeconds: showSeconds))
         taskTotalItem.title = "Task Total: \(formatDuration(taskHistoricalTotal + elapsed))"
+    }
 
+    private func tick() {
+        updateTimerDisplay()
+        guard isRecording else { return }
         let idle = systemIdleSeconds()
 
         if idle >= idleThreshold && !hasPromptedForCurrentIdlePeriod {
@@ -474,8 +397,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .alertSecondButtonReturn:
             // Close out the current segment at the last-active timestamp,
             // then immediately start a fresh one from now - the idle gap is excluded.
-            stopRecording(splitAt: lastActive)
-            startRecording()
+            if stopRecording(splitAt: lastActive) { startRecording() }
         case .alertThirdButtonReturn:
             // Stop for good at the last-active timestamp, no new segment starts.
             stopRecording(splitAt: lastActive)
