@@ -32,12 +32,27 @@ final class TrackingDataTests: XCTestCase {
         XCTAssertEqual(recentTaskNames(from: ["C"] + ["A", "B", "C", "D", "E"]), ["C", "A", "B", "D", "E"])
     }
 
-    func testRecentTasksSeedFromLatestRecordsAndRememberedTask() throws {
+    func testRecentTasksComeFromLatestDistinctCSVRecords() throws {
         for name in ["A", "B", "C", "D", "E", "F", "B"] {
             try save(RecordedSegment(task: name, start: start, end: start.addingTimeInterval(60)))
         }
-        XCTAssertEqual(initialRecentTaskNames(lastTask: "Current", folder: folder), ["Current", "B", "F", "E", "D"])
-        XCTAssertEqual(initialRecentTaskNames(lastTask: "", folder: folder), ["B", "F", "E", "D", "C"])
+        XCTAssertEqual(recordedRecentTaskNames(folder: folder), ["B", "F", "E", "D", "C"])
+    }
+
+    func testRecentTasksReloadMigratedNamesFromDisk() throws {
+        try save(RecordedSegment(task: "Orca - Shop", start: start, end: start.addingTimeInterval(60)))
+        XCTAssertEqual(recordedRecentTaskNames(folder: folder), ["Orca - Shop"])
+        let csvURL = folder.appendingPathComponent("segments.csv")
+        let csv = try String(contentsOf: csvURL, encoding: .utf8)
+        try csv.replacingOccurrences(of: "Orca - Shop", with: "Orca: Shop")
+            .write(to: csvURL, atomically: true, encoding: .utf8)
+        XCTAssertEqual(recordedRecentTaskNames(folder: folder), ["Orca: Shop"])
+    }
+
+    func testMissingAndEmptyCSVProduceNoRecentTasks() throws {
+        XCTAssertEqual(recordedRecentTaskNames(folder: folder), [])
+        try "Task,Start,End,Duration\n".write(to: folder.appendingPathComponent("segments.csv"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(recordedRecentTaskNames(folder: folder), [])
     }
 
     func testSwitchSavesOldTaskAndStartsNewTaskAtExactlySameTime() throws {
@@ -97,7 +112,7 @@ final class TrackingDataTests: XCTestCase {
         XCTAssertEqual(rows.count, 3)
         XCTAssertEqual(rows[1][0], task)
         XCTAssertEqual(totalDuration(forTask: task, folder: folder), 90)
-        XCTAssertEqual(initialRecentTaskNames(lastTask: "", folder: folder), [task])
+        XCTAssertEqual(recordedRecentTaskNames(folder: folder), [task])
         let summary = try String(contentsOf: exportDailySummary(folder: folder))
         XCTAssertTrue(summary.contains(",00:01:30\n"))
         XCTAssertEqual(parseCSV("Task,Start,End,Duration\r\nA,s,e,00:01:00\r\n").count, 2)

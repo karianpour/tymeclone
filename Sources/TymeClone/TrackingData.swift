@@ -65,7 +65,6 @@ let defaultOutputFolder = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("TymeClone")
 let outputFolderDefaultsKey = "OutputFolder"
 let lastTaskNameDefaultsKey = "LastTaskName"
-let recentTaskNamesDefaultsKey = "RecentTaskNames"
 
 func currentOutputFolder() -> URL {
     if let custom = UserDefaults.standard.string(forKey: outputFolderDefaultsKey), !custom.isEmpty {
@@ -130,10 +129,11 @@ func recentTaskNames(from names: [String]) -> [String] {
     return Array(names.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && seen.insert($0).inserted }.prefix(5))
 }
 
-func initialRecentTaskNames(lastTask: String, folder: URL = currentOutputFolder()) -> [String] {
+// Rebuild from disk on every launch so edits and migrations replace old names.
+func recordedRecentTaskNames(folder: URL = currentOutputFolder()) -> [String] {
     let csv = (try? String(contentsOf: folder.appendingPathComponent("segments.csv"), encoding: .utf8)) ?? ""
     let recorded = parseCSV(csv).dropFirst().reversed().compactMap { $0.count == 4 ? $0[0] : nil }
-    return recentTaskNames(from: [lastTask] + recorded)
+    return recentTaskNames(from: recorded)
 }
 
 // Base64 keeps CSV text (including </script> and Unicode) out of executable HTML.

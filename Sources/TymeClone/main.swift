@@ -88,9 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let savedTaskName = UserDefaults.standard.string(forKey: lastTaskNameDefaultsKey) ?? ""
         timer = TaskTimer(taskName: savedTaskName.isEmpty ? "Unnamed task" : savedTaskName)
-        recentTasks = UserDefaults.standard.stringArray(forKey: recentTaskNamesDefaultsKey)
-            .map { recentTaskNames(from: $0) } ?? initialRecentTaskNames(lastTask: savedTaskName)
-        UserDefaults.standard.set(recentTasks, forKey: recentTaskNamesDefaultsKey)
+        recentTasks = recordedRecentTaskNames()
         taskHistoricalTotal = totalDuration(forTask: currentTaskName)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -239,7 +237,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func rememberCurrentTask() {
         recentTasks = recentTaskNames(from: [currentTaskName] + recentTasks)
-        UserDefaults.standard.set(recentTasks, forKey: recentTaskNamesDefaultsKey)
     }
 
     @objc private func setThreshold(_ sender: NSMenuItem) {

@@ -5,7 +5,7 @@ A tiny macOS menu bar timer that reproduces the one feature from [Tyme 2](https:
 ## Features
 
 - Menu bar timer with Start/Stop recording, tagged with a free-text task name
-- Recent-task dropdown with the last five distinct tasks, remembered across restarts
+- Recent-task dropdown rebuilt from the last five distinct tasks in `segments.csv` on every startup
 - Change tasks while recording to save the previous segment and continue under the new task
 - Optional `Project: Task` naming for project totals without changing the CSV format
 - A red dot (● recording) or black square (■ idle) status icon, plus a jitter-free monospaced elapsed time
@@ -65,7 +65,7 @@ Since it's built locally (not downloaded), macOS won't set a quarantine flag, so
 Click the status icon in the menu bar:
 
 - **Start/Stop Recording** — toggles the timer for the current task
-- **Set task (…)** — type a name or select one of the five recent tasks, then click **Set**. Selection only fills the field; Cancel changes nothing. Names are remembered across restarts, and the recent list is initially seeded from saved tasks. An empty field falls back to "Unnamed task". While recording, setting a different task saves the old segment and starts the new one at the same timestamp. If saving fails, the original timer keeps running and an error is shown
+- **Set task (…)** — type a name or select one of the five recent tasks, then click **Set**. Selection only fills the field; Cancel changes nothing. On every startup, the recent list is rebuilt from the last five distinct task names in the current output folder's `segments.csv`, reading the newest records first. Editing or replacing the CSV takes effect on the next launch. Tasks selected during the session move to the top of the list; only recorded names return after restarting. The current task is remembered separately. An empty field falls back to "Unnamed task". While recording, setting a different task saves the old segment and starts the new one at the same timestamp. If saving fails, the original timer keeps running and an error is shown
 - **Task Total: …** — read-only, shows the total time recorded for the current task (sum of all matching `segments.csv` rows, plus the running elapsed time while recording)
 - **Idle Threshold** — how long the Mac must be idle before the popup appears
 - **Show Seconds** — toggle seconds in the menu bar display
