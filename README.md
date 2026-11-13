@@ -5,7 +5,8 @@ A tiny macOS menu bar timer that reproduces the one feature from [Tyme 2](https:
 ## Features
 
 - Menu bar timer with Start/Stop recording, tagged with a free-text task name
-- Recent-task dropdown rebuilt from the last five distinct tasks in `segments.csv` on every startup
+- Visible recent-task list rebuilt from the last five distinct tasks in `segments.csv` on every startup
+- Synchronized full-name input and editable Project/Task fields, with five recent projects and ten recent tasks per project
 - Change tasks while recording to save the previous segment and continue under the new task
 - Optional `Project: Task` naming for project totals without changing the CSV format
 - A red dot (● recording) or black square (■ idle) status icon, plus a jitter-free monospaced elapsed time
@@ -65,13 +66,15 @@ Since it's built locally (not downloaded), macOS won't set a quarantine flag, so
 Click the status icon in the menu bar:
 
 - **Start/Stop Recording** — toggles the timer for the current task
-- **Set task (…)** — type a name or select one of the five recent tasks, then click **Set**. Selection only fills the field; Cancel changes nothing. On every startup, the recent list is rebuilt from the last five distinct task names in the current output folder's `segments.csv`, reading the newest records first. Editing or replacing the CSV takes effect on the next launch. Tasks selected during the session move to the top of the list; only recorded names return after restarting. The current task is remembered separately. An empty field falls back to "Unnamed task". While recording, setting a different task saves the old segment and starts the new one at the same timestamp. If saving fails, the original timer keeps running and an error is shown
+- **Set task (…)** — edit the full task name, choose a row from the visible five-task recent list, or use the editable **Project** and **Task** fields below it. Project offers the last five distinct projects; Task offers the last ten distinct tasks for the entered project. All fields stay synchronized, and changing projects preserves the typed task while updating suggestions. Selection fills the fields; **Set** confirms and **Cancel** changes nothing. A project requires a task, and project names cannot contain the separating colon. Leave Project blank for a standalone task; an entirely empty name falls back to "Unnamed task". While recording, setting a different task saves the old segment and starts the new one at the same timestamp. If saving fails, the original timer keeps running and an error is shown
 - **Task Total: …** — read-only, shows the total time recorded for the current task (sum of all matching `segments.csv` rows, plus the running elapsed time while recording)
 - **Idle Threshold** — how long the Mac must be idle before the popup appears
 - **Show Seconds** — toggle seconds in the menu bar display
 - **Output Folder** — shows the current CSV location; "Choose Output Folder…" picks a custom folder, "Use Default Location" resets to `~/Documents/TymeClone`. **Reveal in Finder** selects `segments.csv` if present, otherwise reveals the output folder (creating it if needed)
 - **Export Daily Summary…** — aggregates `segments.csv` by day into `daily_summary.csv` in the same folder
 - **Open Report** — generates `TymeClone/report.html` in your system temp directory, embeds the current saved CSV, and opens it in your default browser. Choose it again to refresh; browser refresh alone retains the embedded snapshot
+
+Task suggestions are rebuilt from the full `segments.csv` history on every startup and when changing output folders, reading the newest records first. The recent list shows five distinct full names, while project/task suggestions can include older history beyond those five rows. Confirmed names move to the front during the session; only recorded names return after restarting. The current task is remembered separately.
 
 ## CSV format
 
@@ -109,7 +112,7 @@ The selected period applies to every total, chart, and segment row. The period h
 
 Name tasks as `Project: Task`, for example `Orca: Fix checkout` and `Orca: Customer meeting`. The report splits at the first colon and trims spaces around both parts. Both parts must be nonempty; ordinary names such as `Admin` appear under **No project**.
 
-The **By project** chart sums all tasks in each project. **By task** retains the full recorded names so identical task descriptions in different projects stay separate. The segment table shows Project and Task columns. Existing names and the four-column CSV format are preserved; there is no migration or automatic renaming of past work.
+The **By project** chart sums all tasks in each project. **By task** sorts projects alphabetically, then tasks by total duration descending within each project, using task name to break ties. Tasks without a project appear last. This order uses the selected report period and also applies to PDF exports. Full recorded names are retained so identical task descriptions in different projects stay separate. The segment table shows Project and Task columns. Existing names and the four-column CSV format are preserved; there is no migration or automatic renaming of past work.
 
 ## Checks
 
@@ -120,7 +123,7 @@ swift test
 node --test Tests/report.test.cjs
 ```
 
-The report checks exercise the actual embedded JavaScript with a minimal DOM harness. For a manual UI check, launch the app and confirm that recent-task selection requires **Set**, **Cancel** changes nothing, switching during a recording saves time under the old name, **Reveal in Finder** selects the expected file, and **Open Report** displays saved data immediately. Also check PDF export in your browser.
+The report checks exercise the actual embedded JavaScript with a minimal DOM harness. For a manual UI check, launch the app and confirm that clicking a recent row fills all fields without applying it, Project and Task accept both typed text and dropdown choices, changing projects refreshes task suggestions, **Set** is disabled for a project without a task, **Cancel** changes nothing, switching during a recording saves time under the old name, **Reveal in Finder** selects the expected file, and **Open Report** displays saved data immediately. Also check PDF export in your browser.
 
 ## Scope
 

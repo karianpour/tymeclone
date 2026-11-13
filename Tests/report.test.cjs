@@ -221,3 +221,49 @@ test('periods use the recorded start date across midnight and support leap days'
     assert.match(invalid.element('loadError').textContent, /Invalid Start date/);
   }
 });
+
+test('task bars group projects alphabetically, sort durations descending and break ties by task name', () => {
+  const page = load({ csv: header +
+    record('Orca: Shop', '22:22:00') +
+    record('Admin', '30:00:00') +
+    record('Kson: Profile Creator', '01:35:00') +
+    record('Orca: Improvements', '13:35:00') +
+    record('Kson: Mesh Gen', '03:20:00') +
+    record('Orca: Demo Wish', '11:22:00') +
+    record('Kson: Simulation Compute', '06:08:00') +
+    record('Orca: Daily Work', '02:54:00') +
+    record('Kson: Line Manager', '00:59:00') +
+    record('Kson: Alpha', '00:59:00') +
+    record('Unassigned work', '00:10:00') });
+  assert.deepEqual(page.element('taskBars').children.map(row => row.title), [
+    'Kson: Simulation Compute — 06:08:00',
+    'Kson: Mesh Gen — 03:20:00',
+    'Kson: Profile Creator — 01:35:00',
+    'Kson: Alpha — 00:59:00',
+    'Kson: Line Manager — 00:59:00',
+    'Orca: Shop — 22:22:00',
+    'Orca: Improvements — 13:35:00',
+    'Orca: Demo Wish — 11:22:00',
+    'Orca: Daily Work — 02:54:00',
+    'Admin — 30:00:00',
+    'Unassigned work — 00:10:00',
+  ]);
+});
+
+test('task ordering uses aggregated totals for the selected month, year and all time', () => {
+  const page = load({ csv: header +
+    record('Orca: Shop', '01:00:00', '2026-11-07') +
+    record('Orca: Improvements', '02:00:00', '2026-11-08') +
+    record('Orca: Shop', '03:00:00', '2026-02-01') +
+    record('Orca: Improvements', '08:00:00', '2025-12-01') +
+    record('Kson: Mesh', '00:10:00', '2026-11-07') });
+  const titles = () => page.element('taskBars').children.map(row => row.title);
+  assert.deepEqual(titles(), ['Kson: Mesh — 00:10:00', 'Orca: Improvements — 02:00:00', 'Orca: Shop — 01:00:00']);
+  select(page, 'periodMode', 'year');
+  assert.deepEqual(titles(), ['Kson: Mesh — 00:10:00', 'Orca: Shop — 04:00:00', 'Orca: Improvements — 02:00:00']);
+  select(page, 'periodMode', 'all');
+  assert.deepEqual(titles(), ['Kson: Mesh — 00:10:00', 'Orca: Improvements — 10:00:00', 'Orca: Shop — 04:00:00']);
+  page.element('printBtn').click();
+  assert.equal(page.printed(), true);
+  assert.deepEqual(titles(), ['Kson: Mesh — 00:10:00', 'Orca: Improvements — 10:00:00', 'Orca: Shop — 04:00:00']);
+});

@@ -75,8 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var idleThreshold: TimeInterval = 5 * 60
     private var hasPromptedForCurrentIdlePeriod = false
     private var showSeconds = true
-    private var recentTasks: [String] = []
-    private weak var taskDialogField: NSTextField?
+    private var taskHistory = TaskHistory()
 
     private var startStopItem: NSMenuItem!
     private var setTaskItem: NSMenuItem!
@@ -88,7 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let savedTaskName = UserDefaults.standard.string(forKey: lastTaskNameDefaultsKey) ?? ""
         timer = TaskTimer(taskName: savedTaskName.isEmpty ? "Unnamed task" : savedTaskName)
-        recentTasks = recordedRecentTaskNames()
+        taskHistory = recordedTaskHistory()
         taskHistoricalTotal = totalDuration(forTask: currentTaskName)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -176,43 +175,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func setCurrentTask() {
         let alert = NSAlert()
         alert.messageText = "Task"
-        alert.informativeText = "What are you working on? Use Project: Task to group your report by project."
+        alert.informativeText = "Choose a recent task, edit the full name, or enter a project and task below."
         alert.addButton(withTitle: "Set")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .informational
 
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 100))
-        let textField = NSTextField(frame: NSRect(x: 0, y: 72, width: 340, height: 24))
-        textField.stringValue = currentTaskName
-        textField.placeholderString = "Project: Task, or a task name"
-        textField.setAccessibilityLabel("Task name")
-        accessory.addSubview(textField)
-
-        let recentLabel = NSTextField(labelWithString: "Recent tasks")
-        recentLabel.frame = NSRect(x: 0, y: 42, width: 340, height: 20)
-        accessory.addSubview(recentLabel)
-        let recentMenu = NSPopUpButton(frame: NSRect(x: 0, y: 8, width: 340, height: 28), pullsDown: false)
-        recentMenu.addItem(withTitle: recentTasks.isEmpty ? "No recent tasks yet" : "Choose a recent task…")
-        for task in recentTasks {
-            let item = NSMenuItem(title: task, action: nil, keyEquivalent: "")
-            item.representedObject = task
-            recentMenu.menu?.addItem(item)
-        }
-        recentMenu.isEnabled = !recentTasks.isEmpty
-        recentMenu.target = self
-        recentMenu.action = #selector(selectRecentTask(_:))
-        recentMenu.setAccessibilityLabel("Recent tasks")
-        accessory.addSubview(recentMenu)
-        alert.accessoryView = accessory
-        alert.window.initialFirstResponder = textField
-        taskDialogField = textField
-        defer { taskDialogField = nil }
+        let dialog = TaskDialog(currentName: currentTaskName, history: taskHistory, setButton: alert.buttons[0])
+        alert.accessoryView = dialog.view
+        alert.window.initialFirstResponder = dialog.fullNameField
 
         NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let nextTask = dialog.confirmedName else { return }
 
-        let entered = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let nextTask = entered.isEmpty ? "Unnamed task" : entered
         let switchingWhileRecording = isRecording && nextTask != currentTaskName
         let switchedAt = Date()
         do {
@@ -230,13 +205,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateTimerDisplay()
     }
 
-    @objc private func selectRecentTask(_ sender: NSPopUpButton) {
-        guard let task = sender.selectedItem?.representedObject as? String else { return }
-        taskDialogField?.stringValue = task
-    }
-
     private func rememberCurrentTask() {
-        recentTasks = recentTaskNames(from: [currentTaskName] + recentTasks)
+        taskHistory.remember(currentTaskName)
     }
 
     @objc private func setThreshold(_ sender: NSMenuItem) {
@@ -265,12 +235,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if panel.runModal() == .OK, let url = panel.url {
             UserDefaults.standard.set(url.path, forKey: outputFolderDefaultsKey)
             outputFolderInfoItem.title = currentOutputFolder().path
+            taskHistory = recordedTaskHistory()
         }
     }
 
     @objc private func resetOutputFolder() {
         UserDefaults.standard.removeObject(forKey: outputFolderDefaultsKey)
         outputFolderInfoItem.title = currentOutputFolder().path
+        taskHistory = recordedTaskHistory()
     }
 
     @objc private func revealOutputFolder() {

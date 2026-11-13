@@ -125,15 +125,18 @@ func parseCSV(_ text: String) -> [[String]] {
 }
 
 func recentTaskNames(from names: [String]) -> [String] {
-    var seen = Set<String>()
-    return Array(names.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && seen.insert($0).inserted }.prefix(5))
+    TaskHistory(names: names).recentTasks
 }
 
 // Rebuild from disk on every launch so edits and migrations replace old names.
 func recordedRecentTaskNames(folder: URL = currentOutputFolder()) -> [String] {
+    recordedTaskHistory(folder: folder).recentTasks
+}
+
+func recordedTaskHistory(folder: URL = currentOutputFolder()) -> TaskHistory {
     let csv = (try? String(contentsOf: folder.appendingPathComponent("segments.csv"), encoding: .utf8)) ?? ""
     let recorded = parseCSV(csv).dropFirst().reversed().compactMap { $0.count == 4 ? $0[0] : nil }
-    return recentTaskNames(from: recorded)
+    return TaskHistory(names: recorded)
 }
 
 // Base64 keeps CSV text (including </script> and Unicode) out of executable HTML.

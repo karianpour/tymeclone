@@ -390,7 +390,16 @@ let reportHTMLTemplate = #"""
       byDate.set(date, (byDate.get(date) || 0) + r.durationSeconds);
     });
 
-    var taskEntries = Array.from(byTask.entries()).sort(function (a, b) { return b[1] - a[1]; });
+    var taskEntries = Array.from(byTask.entries()).sort(function (a, b) {
+      var left = projectForTask(a[0]);
+      var right = projectForTask(b[0]);
+      if (left.project !== right.project) {
+        if (left.project === null) return 1;
+        if (right.project === null) return -1;
+        return left.project.localeCompare(right.project) || (left.project < right.project ? -1 : 1);
+      }
+      return b[1] - a[1] || left.task.localeCompare(right.task) || a[0].localeCompare(b[0]);
+    });
     var projectEntries = Array.from(byProject.entries()).sort(function (a, b) { return b[1] - a[1]; }).map(function (entry) {
       return [entry[0] === null ? 'No project' : entry[0], entry[1]];
     });
