@@ -66,6 +66,12 @@ func statusBarTitle(icon: NSImage, text: String) -> NSAttributedString {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var pollTimer: Timer?
+    private var terminationSignals: TerminationSignals?
+    private var isQuitting = false
+    private let recovery = RecordingRecovery()
+    private var recoveryNeedsReview = true
+    private var checkpointTimer: Timer?
+    private var checkpointError: Error?
 
     private var timer = TaskTimer(taskName: "Unnamed task")
     private var isRecording: Bool { timer.startedAt != nil }
@@ -74,6 +80,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var taskHistoricalTotal: TimeInterval = 0
     private var idleThreshold: TimeInterval = 5 * 60
     private var hasPromptedForCurrentIdlePeriod = false
+    private var automaticStop = AutomaticStopState()
+    private var interruptionAlert: NSAlert?
+    private var automaticSaveError: Error?
     private var showSeconds = true
     private var taskHistory = TaskHistory()
 
@@ -159,12 +168,183 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem.menu = menu
 
+        observeAvailability()
+        terminationSignals = TerminationSignals { [weak self] in
+            guard let self, !self.isQuitting else { return }
+            NSApp.terminate(nil)
+        }
+
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.tick()
         }
+        DispatchQueue.main.async { [weak self] in self?.reviewRecovery() }
+    }
+
+    private func reviewRecovery() {
+        guard recoveryNeedsReview, !isRecording, !isQuitting, !automaticStop.isAway,
+              NSApp.modalWindow == nil else { return }
+        do {
+            try recovery.load()
+            // Complete an already requested save. The journal detects whether the
+            // CSV replacement happened before the process was killed.
+            if recovery.recording?.commit != nil { try recovery.finishSave() }
+            guard let saved = recovery.recording else {
+                recoveryNeedsReview = false
+                refreshRecordedTotals()
+                return
+            }
+            while true {
+                let alert = NSAlert()
+                alert.messageText = "Recover interrupted recording?"
+                alert.informativeText = "Task: \(saved.task)\nStarted: \(formatDateTime(saved.start))\nLast checkpoint: \(formatDateTime(saved.checkpoint))\nRecoverable time: \(formatDuration(saved.checkpoint.timeIntervalSince(saved.start)))\n\nCheckpoints are saved every 2 minutes. Time after the last checkpoint is not included. The recording will remain stopped."
+                alert.addButton(withTitle: "Recover Recording")
+                alert.addButton(withTitle: "Adjust End Time…")
+                alert.addButton(withTitle: "Discard Recording")
+                interruptionAlert = alert
+                NSApp.activate(ignoringOtherApps: true)
+                let response = alert.runModal()
+                interruptionAlert = nil
+                guard !automaticStop.isAway, response != .abort else { return }
+                switch response {
+                case .alertFirstButtonReturn:
+                    try recovery.recover(endingAt: saved.checkpoint)
+                case .alertSecondButtonReturn:
+                    guard let end = adjustedRecoveryEnd(for: saved) else {
+                        if automaticStop.isAway { return }
+                        continue
+                    }
+                    try recovery.recover(endingAt: end)
+                case .alertThirdButtonReturn:
+                    try recovery.discard()
+                default: continue
+                }
+                recoveryNeedsReview = false
+                refreshRecordedTotals()
+                return
+            }
+        } catch {
+            showError("Could not recover recording", detail: "The recovery file has been preserved. Choose Start Recording to retry recovery before starting a new recording.\n\(error.localizedDescription)")
+        }
+    }
+
+    private func adjustedRecoveryEnd(for saved: RecoveryRecording) -> Date? {
+        let alert = NSAlert()
+        alert.messageText = "Adjust recording end time"
+        alert.informativeText = "Choose when you stopped working on ‘\(saved.task)’. Started: \(formatDateTime(saved.start))."
+        let picker = NSDatePicker(frame: NSRect(x: 0, y: 0, width: 320, height: 28))
+        picker.datePickerStyle = .textFieldAndStepper
+        picker.datePickerElements = [.yearMonthDay, .hourMinuteSecond]
+        picker.minDate = saved.start
+        picker.maxDate = Date()
+        picker.dateValue = saved.checkpoint
+        alert.accessoryView = picker
+        alert.addButton(withTitle: "Recover Recording")
+        alert.addButton(withTitle: "Cancel")
+        interruptionAlert = alert
+        let response = alert.runModal()
+        interruptionAlert = nil
+        guard response == .alertFirstButtonReturn, !automaticStop.isAway else { return nil }
+        return picker.dateValue
+    }
+
+    private func refreshRecordedTotals() {
+        taskHistoricalTotal = totalDuration(forTask: currentTaskName)
+        taskHistory = recordedTaskHistory()
+        taskTotalItem.title = "Task Total: \(formatDuration(taskHistoricalTotal))"
+    }
+
+    private func scheduleCheckpoints() {
+        checkpointTimer?.invalidate()
+        let checkpointTimer = Timer(timeInterval: RecordingRecovery.checkpointInterval, repeats: false) { [weak self] _ in
+            guard let self, self.isRecording else { return }
+            defer { if self.isRecording { self.scheduleCheckpoints() } }
+            guard !self.automaticStop.isAway, self.automaticStop.pending == nil,
+                  !self.isQuitting else { return }
+            do { try self.recovery.checkpoint(at: Date()) }
+            catch { self.checkpointError = error }
+        }
+        self.checkpointTimer = checkpointTimer
+        // Checkpoint even while a menu or idle/task dialog is open.
+        RunLoop.main.add(checkpointTimer, forMode: .common)
+        RunLoop.main.add(checkpointTimer, forMode: .modalPanel)
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isQuitting else { return .terminateCancel }
+        isQuitting = true
+        // Saving is synchronous; keep the app and its active segment alive on failure.
+        guard stopRecording() else {
+            isQuitting = false
+            return .terminateCancel
+        }
+        return .terminateNow
+    }
+
+    private func observeAvailability() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(sessionInactive), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(sessionActive), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
+        // macOS distributes screen-lock events separately from workspace sleep events.
+        let distributed = DistributedNotificationCenter.default()
+        distributed.addObserver(self, selector: #selector(screenLocked), name: Notification.Name("com.apple.screenIsLocked"), object: nil, suspensionBehavior: .deliverImmediately)
+        distributed.addObserver(self, selector: #selector(screenUnlocked), name: Notification.Name("com.apple.screenIsUnlocked"), object: nil, suspensionBehavior: .deliverImmediately)
+    }
+
+    @objc private func willSleep(_ notification: Notification) { leave(.sleep) }
+    @objc private func didWake(_ notification: Notification) { returned(.sleep) }
+    @objc private func screenLocked(_ notification: Notification) { leave(.lock) }
+    @objc private func screenUnlocked(_ notification: Notification) { returned(.lock) }
+    @objc private func sessionInactive(_ notification: Notification) { leave(.inactiveSession) }
+    @objc private func sessionActive(_ notification: Notification) { returned(.inactiveSession) }
+
+    private func leave(_ reason: AutomaticStopState.Absence) {
+        automaticStop.leave(reason, recording: isRecording, at: Date())
+        if let alert = interruptionAlert {
+            NSApp.abortModal()
+            alert.window.orderOut(nil)
+        }
+        guard let pending = automaticStop.pending, isRecording else { return }
+        // Save synchronously before sleep. Defer any error UI until the user returns.
+        stopRecording(splitAt: pending.date, automatic: true)
+    }
+
+    private func returned(_ reason: AutomaticStopState.Absence) {
+        automaticStop.returnFrom(reason)
+        // Allow overlapping wake/unlock notifications and aborted modal loops to settle.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.reviewRecovery()
+            self?.promptAutomaticStopIfNeeded()
+        }
+    }
+
+    private func promptAutomaticStopIfNeeded() {
+        guard !isQuitting, automaticStop.shouldPrompt, interruptionAlert == nil,
+              NSApp.modalWindow == nil, let pending = automaticStop.pending else { return }
+        if let error = automaticSaveError {
+            automaticSaveError = nil
+            showError("Could not save automatic stop", detail: "The recording is held at \(formatClock(pending.date)). Choose Stop Recording to retry saving.\n\(error.localizedDescription)")
+            return
+        }
+        guard !isRecording else { return }
+        let alert = NSAlert()
+        alert.messageText = "Recording stopped automatically"
+        alert.informativeText = "Recording for ‘\(currentTaskName)’ was saved at \(formatClock(pending.date)) because \(pending.reason.description). Would you like to start recording again?"
+        alert.addButton(withTitle: "Start Recording")
+        alert.addButton(withTitle: "Keep Stopped").keyEquivalent = "\u{1b}"
+        interruptionAlert = alert
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        interruptionAlert = nil
+        guard !automaticStop.isAway, response != .abort else { return }
+        automaticStop.acknowledge()
+        if response == .alertFirstButtonReturn { startRecording() }
     }
 
     @objc private func toggleRecording() {
+        if recoveryNeedsReview { reviewRecovery(); return }
+        guard !automaticStop.isAway else { return }
         if isRecording {
             stopRecording()
         } else {
@@ -173,6 +353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func setCurrentTask() {
+        guard !automaticStop.isAway, automaticStop.pending == nil, recovery.recording?.commit == nil else { return }
         let alert = NSAlert()
         alert.messageText = "Task"
         alert.informativeText = "Choose a recent task, edit the full name, or enter a project and task below."
@@ -186,10 +367,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn,
+              !automaticStop.isAway, automaticStop.pending == nil,
               let nextTask = dialog.confirmedName else { return }
 
         let switchingWhileRecording = isRecording && nextTask != currentTaskName
         let switchedAt = Date()
+        if switchingWhileRecording && !stopRecording(splitAt: switchedAt) { return }
         do {
             try timer.setTask(nextTask, at: switchedAt, save: saveSegment)
         } catch {
@@ -201,7 +384,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setTaskItem.title = "Set task (\(currentTaskName))"
         taskHistoricalTotal = totalDuration(forTask: currentTaskName)
         taskTotalItem.title = "Task Total: \(formatDuration(taskHistoricalTotal))"
-        if switchingWhileRecording { hasPromptedForCurrentIdlePeriod = false }
+        if switchingWhileRecording { startRecording(at: switchedAt) }
         updateTimerDisplay()
     }
 
@@ -294,7 +477,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startRecording(at date: Date = Date()) {
+        guard !automaticStop.isAway, !recoveryNeedsReview else { return }
+        do { try recovery.begin(task: currentTaskName, at: date, folder: currentOutputFolder()) }
+        catch {
+            showError("Could not start recording", detail: "Recording was not started because its recovery information could not be saved.\n\(error.localizedDescription)")
+            return
+        }
+        automaticStop.acknowledge()
         timer.start(at: date)
+        checkpointError = nil
+        scheduleCheckpoints()
         rememberCurrentTask()
         hasPromptedForCurrentIdlePeriod = false
         startStopItem.title = "Stop Recording"
@@ -303,17 +495,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
-    private func stopRecording(splitAt endDate: Date? = nil) -> Bool {
+    private func stopRecording(splitAt endDate: Date? = nil, automatic: Bool = false) -> Bool {
         let segment: RecordedSegment
         do {
-            guard let saved = try timer.stop(at: endDate ?? Date(), save: saveSegment) else { return true }
+            let end = recovery.recording?.commit?.end ?? automaticStop.pending?.date ?? endDate ?? Date()
+            guard let saved = try timer.stop(at: end, save: { segment in
+                try recovery.save(endingAt: segment.end)
+            }) else { return true }
             segment = saved
         } catch {
-            showSaveError(error)
+            if automatic { automaticSaveError = error } else { showSaveError(error) }
             return false
         }
         print("Segment: \(formatClock(segment.start)) - \(formatClock(segment.end)) (\(formatDuration(segment.duration))) [\(currentTaskName)]")
-        taskHistoricalTotal += segment.duration
+        automaticSaveError = nil
+        checkpointTimer?.invalidate()
+        checkpointTimer = nil
+        checkpointError = nil
+        taskHistoricalTotal = totalDuration(forTask: currentTaskName)
         taskTotalItem.title = "Task Total: \(formatDuration(taskHistoricalTotal))"
         startStopItem.title = "Start Recording"
         updateTimerDisplay()
@@ -321,7 +520,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showSaveError(_ error: Error) {
-        showError("Could not save recording", detail: "The timer is still running for \(currentTaskName).\n\(error.localizedDescription)")
+        let status = recovery.recording?.commit == nil && automaticStop.pending == nil
+            ? "The timer is still running for \(currentTaskName)."
+            : "The recording is held at its stop time. Choose Stop Recording to retry."
+        showError("Could not save recording", detail: "\(status)\n\(error.localizedDescription)")
     }
 
     private func updateTimerDisplay() {
@@ -330,14 +532,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let elapsed = Date().timeIntervalSince(start)
+        let elapsed = (recovery.recording?.commit?.end ?? automaticStop.pending?.date ?? Date()).timeIntervalSince(start)
         statusItem.button?.attributedTitle = statusBarTitle(icon: recordingIcon, text: formatDuration(elapsed, includeSeconds: showSeconds))
         taskTotalItem.title = "Task Total: \(formatDuration(taskHistoricalTotal + elapsed))"
     }
 
     private func tick() {
+        guard !isQuitting else { return }
         updateTimerDisplay()
-        guard isRecording else { return }
+        if let error = checkpointError, NSApp.modalWindow == nil, !automaticStop.isAway {
+            checkpointError = nil
+            showError("Could not update recovery checkpoint", detail: "Recording continues, but recovery may use an older checkpoint.\n\(error.localizedDescription)")
+        }
+        promptAutomaticStopIfNeeded()
+        guard isRecording, !automaticStop.isAway, automaticStop.pending == nil,
+              recovery.recording?.commit == nil, interruptionAlert == nil else { return }
         let idle = systemIdleSeconds()
 
         if idle >= idleThreshold && !hasPromptedForCurrentIdlePeriod {
@@ -349,6 +558,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func promptIdleDecision(idleSeconds: TimeInterval) {
+        let promptedSessionStart = sessionStart
         let lastActive = Date().addingTimeInterval(-idleSeconds)
 
         let alert = NSAlert()
@@ -360,7 +570,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.alertStyle = .warning
 
         NSApp.activate(ignoringOtherApps: true)
+        interruptionAlert = alert
         let response = alert.runModal()
+        interruptionAlert = nil
+        guard response != .abort, !automaticStop.isAway, automaticStop.pending == nil,
+              isRecording, sessionStart == promptedSessionStart else { return }
 
         switch response {
         case .alertSecondButtonReturn:

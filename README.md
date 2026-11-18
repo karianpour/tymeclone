@@ -15,9 +15,12 @@ A tiny macOS menu bar timer that reproduces the one feature from [Tyme 2](https:
   - **Keep Running** — count the idle time as work
   - **Split Here** — end the current segment at the last-active timestamp and start a new one now, keeping the same task
   - **Stop** — end the current segment at the last-active timestamp and stop recording
+- Automatically saves and stops an active recording when the Mac locks, sleeps (including lid closure that causes sleep), or switches away from your user session. On return, **Start Recording** starts a fresh segment for the same task; **Keep Stopped** dismisses the dialog. If recording was already stopped, no dialog appears. Overlapping lock/sleep events produce a single prompt, after waking and unlocking.
 - Configurable idle threshold (1/3/5/10/15 min)
 - "Show Seconds" toggle for the menu bar display
 - Read-only "Task Total" menu entry showing the summed time for the current task across all recorded segments, live while recording
+- Normal Quit, Terminal `kill <pid>` (SIGTERM), and Ctrl+C (SIGINT) save the current recording before exiting. If saving fails, the app stays open and shows an error. Force Quit and `kill -9` cannot save at termination; the next launch offers recovery from the last checkpoint.
+- Recovery information is saved immediately on Start and checkpointed every **2 minutes**, including while menus or dialogs are open. After an unexpected exit, choose **Recover Recording**, **Adjust End Time…**, or **Discard Recording**. Recovery leaves recording stopped and does not count time while the app was closed.
 - Every finished segment is appended to a `segments.csv` file, one row per segment
 - Configurable output folder (defaults to `~/Documents/TymeClone`, resolved at runtime so it works on any machine), with Reveal in Finder
 - "Export Daily Summary…" writes a `daily_summary.csv` with per-day totals
@@ -76,6 +79,18 @@ Click the status icon in the menu bar:
 
 Task suggestions are rebuilt from the full `segments.csv` history on every startup and when changing output folders, reading the newest records first. The recent list shows five distinct full names, while project/task suggestions can include older history beyond those five rows. Confirmed names move to the front during the session; only recorded names return after restarting. The current task is remembered separately.
 
+## Interrupted recording recovery
+
+The recovery file is `~/Library/Application Support/TymeClone/recording-recovery.json`. It records a unique recording ID, task, start time, last checkpoint, and the output folder selected when recording started. Changing the output folder applies to subsequent recordings; an active or recovered segment stays with its original folder.
+
+Start writes this file immediately and refuses to start if it cannot be saved. A checkpoint is written every two minutes while recording. On normal Stop, Quit, task switch, lock, or sleep, the exact end time is saved rather than waiting for a checkpoint. Successful saves remove the recovery file. Checkpoint failures preserve the previous checkpoint and report an error; corrupted recovery files are preserved and block a new recording until resolved.
+
+On relaunch, an interrupted active recording offers **Recover Recording** through the last checkpoint, **Adjust End Time…** using a date/time picker, or **Discard Recording**. Discard immediately deletes the recovery information. Canceling the end-time picker returns to the recovery choice. There is no recovery menu or option to defer the decision. Recovery never starts a timer automatically. An end time must be between the recording's start and the current time. If the app was killed before its first checkpoint, the initial recovery has zero duration; use Adjust End Time to supply the missing time.
+
+To prevent duplicate rows if the process dies during a save, a journal stores the intended CSV bytes before the atomic CSV replacement. On relaunch, a pending save is completed or recognized as already saved, then the journal is removed. If the CSV was independently changed, the app preserves both files and reports the conflict instead of overwriting it. The CSV format remains four columns.
+
+Manual check: start a disposable task, wait for at least one two-minute checkpoint, Force Quit, and relaunch. Recover should save only through the displayed checkpoint. Also try Adjust End Time (including Cancel returning to the recovery choice) and Discard Recording. After discarding, relaunch and confirm there is no recovery prompt or recovery menu item. A normal stop or quit should leave no recovery prompt on relaunch.
+
 ## CSV format
 
 `segments.csv` gets a header row on first write, then one row per finished segment:
@@ -121,13 +136,16 @@ Run the native regression tests and the dependency-free report checks:
 ```sh
 swift test
 node --test Tests/report.test.cjs
+python3 Tests/recovery_process_test.py
 ```
 
-The report checks exercise the actual embedded JavaScript with a minimal DOM harness. For a manual UI check, launch the app and confirm that clicking a recent row fills all fields without applying it, Project and Task accept both typed text and dropdown choices, changing projects refreshes task suggestions, **Set** is disabled for a project without a task, **Cancel** changes nothing, switching during a recording saves time under the old name, **Reveal in Finder** selects the expected file, and **Open Report** displays saved data immediately. Also check PDF export in your browser.
+The recovery process check compiles a disposable helper using the production storage code, kills it with SIGKILL at three save stages, and verifies recovery happens exactly once. It does not touch your installed app or recordings.
+
+The report checks exercise the actual embedded JavaScript with a minimal DOM harness. For a manual UI check, launch the app and confirm that clicking a recent row fills all fields without applying it, Project and Task accept both typed text and dropdown choices, changing projects refreshes task suggestions, **Set** is disabled for a project without a task, **Cancel** changes nothing, switching during a recording saves time under the old name, **Reveal in Finder** selects the expected file, and **Open Report** displays saved data immediately. Also check PDF export in your browser. For automatic stops, test lock/unlock, sleep/wake, and lid close/open while recording: confirm one saved segment ending at departure, one return dialog, and a new start time only after choosing Start Recording. Repeat with recording already stopped (no dialog), choose Keep Stopped (no restart), and lock while the idle or restart dialog is open. Lock detection uses macOS distributed screen-lock notifications; verify these on the target macOS version. If saving fails, the original recording is retained with its end time held at departure; an error appears on return and Stop Recording retries the save.
 
 ## Scope
 
-This remains a focused menu bar timer. Project grouping is derived from task names; there is no project-management hierarchy or editing of past segments. Stop a running recording before quitting the app.
+This remains a focused menu bar timer. Project grouping is derived from task names; there is no project-management hierarchy or editing of past segments. Normal Quit saves a running recording automatically. Forced termination can lose time since the last successful checkpoint (normally less than two minutes; longer if the app was unresponsive or a checkpoint failed). The recovery dialog allows correcting the end time.
 
 ## Please note
 
